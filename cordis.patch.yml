@@ -1,0 +1,9 @@
+# dsh-conversation-archive
+# 安装后按需启用。refresh.script 指向 Codex adapter（可选）：
+#   refresh:
+#     script: <package>/adapters/codex/export_codex_threads.py
+- insert:
+    - id: conversation-archive
+      name: 'dsh-conversation-archive'
+      config:
+        root: ~/.dsh/conversation-archive

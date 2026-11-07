@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Conversation archive">
+  <rect x="6" y="10" width="52" height="44" rx="8" fill="none" stroke="#4c8dff" stroke-width="3"/>
+  <path d="M16 22h32M16 31h24M16 40h18" stroke="#4c8dff" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="46" cy="44" r="8" fill="#4c8dff" opacity="0.18"/>
+  <path d="M43 44h6M46 41v6" stroke="#4c8dff" stroke-width="2.4" stroke-linecap="round"/>
+</svg>

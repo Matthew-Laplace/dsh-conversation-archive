@@ -1,0 +1,51 @@
+{
+  "name": "dsh-conversation-archive",
+  "version": "0.1.2",
+  "description": "Browse and search conversations archived from external coding agents (Codex, ...) inside DeepSeek Harness, from the Settings page and from agent tools.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "codex",
+    "archive",
+    "conversation",
+    "migration"
+  ],
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./adapters/codex/export_codex_threads.py": "./adapters/codex/export_codex_threads.py",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "adapters/**/*.py"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  },
+  "author": "syc-ai",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Matthew-Laplace/dsh-conversation-archive.git"
+  },
+  "homepage": "https://github.com/Matthew-Laplace/dsh-conversation-archive#readme",
+  "bugs": {
+    "url": "https://github.com/Matthew-Laplace/dsh-conversation-archive/issues"
+  }
+}
