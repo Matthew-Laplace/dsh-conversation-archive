@@ -1,12 +1,12 @@
-import { readFileSync, statSync, existsSync } from 'node:fs'
-import { execFile } from 'node:child_process'
+import { readFileSync, writeFileSync, mkdirSync, statSync, existsSync } from 'node:fs'
+import { execFile, spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { join, resolve, sep } from 'node:path'
 import { homedir } from 'node:os'
 
 export const name = 'conversation-archive'
 
-export const inject = ['tools', 'webServer']
+export const inject = ['tools', 'webServer', 'llm']
 
 function expandHome(value) {
   return value.startsWith('~') ? join(homedir(), value.slice(1)) : value
@@ -457,6 +457,9 @@ function dispatch(root, params) {
       limit: Number(params.get('limit') ?? 20000),
     })
   }
+  if (op === 'bindings') {
+    return { bindings: readBindings(root) }
+  }
   if (op === 'search') {
     return searchConversations(root, {
       query: params.get('q') ?? '',
@@ -470,6 +473,289 @@ function dispatch(root, params) {
 
 function jsonText(value) {
   return [{ type: 'text', text: JSON.stringify(value, null, 2) }]
+}
+
+// ---- Codex 线程后端：DSH 会话的每一轮交给 Codex CLI 原生线程执行 ----
+const BINDINGS_FILE = 'codex-bindings.json'
+
+function bindingsPath(root) {
+  return join(root, BINDINGS_FILE)
+}
+
+function readBindings(root) {
+  const path = bindingsPath(root)
+  if (!existsSync(path)) return {}
+  try {
+    const data = JSON.parse(readFileSync(path, 'utf8'))
+    return data && typeof data === 'object' ? data : {}
+  } catch {
+    return {}
+  }
+}
+
+function writeBindings(root, data) {
+  try {
+    mkdirSync(root, { recursive: true })
+    writeFileSync(bindingsPath(root), `${JSON.stringify(data, null, 2)}\n`, 'utf8')
+  } catch {
+    // 绑定信息是尽力而为；写不进去时仍可用新建线程模式
+  }
+}
+
+function getSessionBinding(root, sessionId) {
+  if (!sessionId) return undefined
+  return readBindings(root)[sessionId]
+}
+
+function putSessionBinding(root, sessionId, patch) {
+  if (typeof sessionId !== 'string' || sessionId.length === 0) return undefined
+  const all = readBindings(root)
+  const next = { ...(all[sessionId] ?? {}), ...patch, updatedAt: Date.now() }
+  writeBindings(root, { ...all, [sessionId]: next })
+  return next
+}
+
+function readJsonBody(req) {
+  return new Promise((resolvePromise) => {
+    let raw = ''
+    req.on('data', (chunk) => {
+      raw += chunk
+      if (raw.length > 1024 * 1024) req.destroy()
+    })
+    req.on('end', () => {
+      try {
+        resolvePromise(raw.trim() ? JSON.parse(raw) : {})
+      } catch {
+        resolvePromise({})
+      }
+    })
+    req.on('error', () => resolvePromise({}))
+  })
+}
+
+function lastUserPrompt(messages) {
+  for (let i = (messages ?? []).length - 1; i >= 0; i -= 1) {
+    const message = messages[i]
+    if (message?.role !== 'user') continue
+    const text = (message.content ?? [])
+      .map((part) => (part?.type === 'text' ? String(part.text ?? '') : ''))
+      .join('\n')
+      .trim()
+    if (text) return text
+  }
+  return ''
+}
+
+function shortTitle(text) {
+  const first = String(text ?? '').trim().split('\n').find((line) => line.trim()) ?? 'Codex 会话'
+  return first.length > 36 ? `${first.slice(0, 36)}…` : first
+}
+
+function codexMarkdownItem(item) {
+  if (!item || typeof item !== 'object') return ''
+  if (item.type === 'agent_message') return String(item.text ?? '').trim()
+  if (item.type === 'command_execution') {
+    const output = String(item.aggregated_output ?? '')
+    const clipped = output.length > 4000 ? `${output.slice(0, 2200)}\n…\n${output.slice(-1500)}` : output
+    const exit = item.exit_code === null || item.exit_code === undefined ? '' : `\n退出码：${item.exit_code}`
+    return [
+      '**⚙️ Codex 执行命令**',
+      '',
+      '```sh',
+      String(item.command ?? ''),
+      '```',
+      output.trim() ? '\n```text' : '',
+      clipped,
+      output.trim() ? '```' : '',
+      exit,
+    ].filter(Boolean).join('\n')
+  }
+  if (item.type === 'file_change') {
+    const changes = (item.changes ?? []).map((change) => `- ${change.kind ?? 'update'} ${change.path ?? ''}`).join('\n')
+    return `**📝 Codex 修改文件**\n\n${changes}`.trim()
+  }
+  if (item.type === 'mcp_tool_call') {
+    return `**🔧 Codex 工具调用**\n\n\`${item.server ?? ''}/${item.tool ?? ''}\``
+  }
+  if (item.type === 'error') return `⚠️ Codex: ${String(item.message ?? '')}`.trim()
+  return ''
+}
+
+function* textBlock(index, text) {
+  yield { type: 'block-start', index, blockType: 'text' }
+  yield { type: 'text-delta', index, text }
+  yield { type: 'block-end', index, block: { type: 'text', text } }
+}
+
+function* reasoningBlock(index, text) {
+  yield { type: 'block-start', index, blockType: 'reasoning' }
+  yield { type: 'reasoning-delta', index, text }
+  yield { type: 'block-end', index, block: { type: 'reasoning', text } }
+}
+
+function codexTurnArgs({ binding, prompt, model }) {
+  const flags = ['--json', '-m', model, '-c', 'sandbox_mode="read-only"', '--skip-git-repo-check']
+  if (binding?.threadId) {
+    return ['exec', 'resume', binding.threadId, ...flags, prompt]
+  }
+  return ['exec', ...flags, '-s', 'read-only', prompt]
+}
+
+async function* spawnCodexEvents({ cli, args, cwd, signal }) {
+  const child = spawn(cli, args, {
+    cwd: cwd && existsSync(cwd) ? cwd : process.cwd(),
+    env: process.env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  let buffer = ''
+  let stderr = ''
+  let ended = false
+  const queue = []
+  let wake
+  const notify = () => {
+    const resume = wake
+    wake = undefined
+    resume?.()
+  }
+  child.stdout.setEncoding('utf8')
+  child.stdout.on('data', (chunk) => {
+    buffer += chunk
+    let cut
+    while ((cut = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, cut).trim()
+      buffer = buffer.slice(cut + 1)
+      if (!line) continue
+      try {
+        queue.push(JSON.parse(line))
+      } catch {
+        queue.push({ type: 'raw', line })
+      }
+    }
+    notify()
+  })
+  child.stderr.setEncoding('utf8')
+  child.stderr.on('data', (chunk) => {
+    stderr = `${stderr}${chunk}`.slice(-2000)
+  })
+  const abort = () => {
+    try {
+      child.kill('SIGTERM')
+    } catch {
+      // 进程已退出
+    }
+  }
+  child.on('close', () => {
+    ended = true
+    notify()
+  })
+  signal?.addEventListener('abort', abort)
+  try {
+    while (true) {
+      while (queue.length > 0) yield queue.shift()
+      if (ended) break
+      await new Promise((resolvePromise) => {
+        wake = resolvePromise
+      })
+    }
+    while (queue.length > 0) yield queue.shift()
+    if (stderr.trim()) yield { type: 'raw', line: stderr.trim().slice(-800) }
+  } finally {
+    signal?.removeEventListener('abort', abort)
+    abort()
+  }
+}
+
+function createCodexThreadAdapter({ root, cli, codexModel }) {
+  return {
+    providerInfo(provider) {
+      return { id: provider, name: 'Codex 线程' }
+    },
+    providerRetryPolicy() {
+      return undefined
+    },
+    async listModels() {
+      return [{ id: 'codex-thread', name: 'Codex 线程', contextWindow: 200000 }]
+    },
+    async resolveModel(provider, model) {
+      return { provider, id: model, name: model, contextWindow: 200000 }
+    },
+    async prepareCall(provider, model, signal) {
+      return {
+        model: await this.resolveModel(provider, model, signal),
+        stream: (options) => this.stream(options),
+      }
+    },
+    async *stream(options) {
+      const sessionId = options?.sessionId
+      const prompt = lastUserPrompt(options?.messages)
+      if (!prompt) {
+        yield* textBlock(0, '（没有收到用户消息）')
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      if (options?.purpose) {
+        yield* textBlock(0, shortTitle(prompt))
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      const binding = getSessionBinding(root, sessionId)
+      const model = codexModel || (options?.model && options.model !== 'codex-thread' ? options.model : 'deepseek-flash')
+      const args = codexTurnArgs({ binding, prompt, model })
+      let index = 0
+      try {
+        for await (const event of spawnCodexEvents({
+          cli,
+          args,
+          cwd: binding?.cwd,
+          signal: options?.signal,
+        })) {
+          if (event.type === 'thread.started' && event.thread_id) {
+            putSessionBinding(root, sessionId, { threadId: String(event.thread_id) })
+            continue
+          }
+          if (event.type === 'item.completed') {
+            const item = event.item ?? {}
+            if (item.type === 'reasoning') {
+              const text = String(item.text ?? item.summary ?? '').trim()
+              if (text) {
+                yield* reasoningBlock(index, text)
+                index += 1
+              }
+              continue
+            }
+            const text = codexMarkdownItem(item)
+            if (text) {
+              yield* textBlock(index, text)
+              index += 1
+            }
+            continue
+          }
+          if (event.type === 'turn.completed') continue
+          if (event.type === 'error' || event.type === 'turn.failed') {
+            const message = String(event.message ?? event.error?.message ?? 'Codex 运行失败')
+            yield* textBlock(index, `⚠️ ${message}`)
+            index += 1
+            continue
+          }
+          if (event.type === 'raw' && /error|failed|not found/i.test(event.line)) {
+            yield* textBlock(index, `⚠️ Codex: ${String(event.line).slice(0, 600)}`)
+            index += 1
+          }
+        }
+      } catch (error) {
+        yield* textBlock(index, `⚠️ Codex 启动失败：${error instanceof Error ? error.message : String(error)}`)
+      }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    },
+  }
+}
+
+export function bindCodexSession(root, sessionId, patch = {}) {
+  return putSessionBinding(root, sessionId, patch)
+}
+
+export function listCodexBindings(root) {
+  return readBindings(root)
 }
 
 export function apply(ctx, config = {}) {
@@ -486,6 +772,16 @@ export function apply(ctx, config = {}) {
 
   const codex = { ...DEFAULT_CODEX_CONFIG, ...(config.codex || {}) }
 
+  if (config.llm === true) {
+    const adapter = createCodexThreadAdapter({
+      root,
+      cli: resolveCodexCli(codex),
+      codexModel: config.codexModel || 'deepseek-flash',
+    })
+    ctx.effect(() => ctx.llm.registerAdapter(['codex-thread'], adapter))
+    return
+  }
+
   ctx.effect(() =>
     ctx.webServer.register({
       kind: 'prefix',
@@ -493,6 +789,24 @@ export function apply(ctx, config = {}) {
       async handler(req, res) {
         try {
           const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+          if (req.method === 'POST' || url.pathname.endsWith('/bind')) {
+            const body = await readJsonBody(req)
+            const sessionId = String(body.sessionId ?? '')
+            if (!sessionId.startsWith('session-')) throw new Error('sessionId is required')
+            const threadId = String(body.threadId ?? '')
+            if (threadId && !CODEX_UUID_RE.test(threadId)) throw new Error('threadId must be a Codex thread id')
+            const binding = putSessionBinding(root, sessionId, {
+              threadId,
+              title: String(body.title ?? ''),
+              cwd: String(body.cwd ?? ''),
+            })
+            res.writeHead(200, {
+              'content-type': 'application/json; charset=utf-8',
+              'cache-control': 'no-store',
+            })
+            res.end(JSON.stringify({ ok: true, binding }))
+            return
+          }
           const refreshed = url.searchParams.get('refresh') === '0' ? null : await maybeRefresh(root, refresh)
           const payload = dispatch(root, url.searchParams)
           const body = JSON.stringify(refreshed ? { ...payload, refreshed } : payload)

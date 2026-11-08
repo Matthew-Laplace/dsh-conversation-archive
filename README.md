@@ -66,6 +66,34 @@ Notes:
 - The CLI path can be overridden with `config.codex.cli` or the `CODEX_CLI` environment
   variable.
 
+## Codex sessions in the sidebar
+
+0.3.0 adds a Codex front end to the Harness sidebar. The session looks like a normal
+Harness session, but its replies come from a native Codex thread through the Codex CLI,
+not from the Harness model.
+
+- **Sidebar footer action** (`Codex` with an OpenAI/Codex mark): opens the add dialog.
+- **New Codex session**: creates a Harness session bound to the `codex` agent preset; the
+  first user message starts a new Codex thread with `codex exec --json`.
+- **Paste deep link**: accepts `codex://threads/<id>` or a raw thread id and creates a
+  session bound to that existing Codex thread.
+- **One-click fetch**: lists unarchived Codex threads from the archive index; pick one to
+  bind it without leaving the Harness.
+- **Session row icon**: bound sessions show the Codex mark in the left sidebar.
+- Command, file-change, reasoning, and message items from `codex exec --json` are mirrored
+  into the Harness transcript as chat content. The Codex CLI executes them once; the
+  Harness only displays the result.
+
+Binding metadata is stored at `~/.dsh/conversation-archive/codex-bindings.json`. The
+host-side adapter is registered as the LLM provider `codex-thread`; its Codex model comes
+from the `codexModel` config field (default `deepseek-flash`). Agent preset `codex` is
+declared by this bundle's patch.
+
+Requirement: after installing a new version of this plugin, reload plugins or restart
+DeepSeek Harness so the `codex-thread` provider and the `codex` preset are registered.
+
+## Archive format
+
 ## Archive format
 
 The plugin knows nothing about Codex. It reads a directory:

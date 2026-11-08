@@ -1,7 +1,7 @@
 {
   "name": "dsh-conversation-archive",
-  "version": "0.2.0",
-  "description": "Browse and search conversations archived from external coding agents (Codex, ...) inside DeepSeek Harness, from the Settings page and from agent tools — and send a message back into an unarchived Codex thread (including model switching).",
+  "version": "0.3.0",
+  "description": "Browse Codex conversations inside DeepSeek Harness, send messages back into unarchived Codex threads, and open Codex-backed sessions in the sidebar with an OpenAI/Codex icon.",
   "type": "module",
   "license": "MIT",
   "keywords": [

@@ -7,6 +7,26 @@
       name: 'dsh-conversation-archive'
       config:
         root: ~/.dsh/conversation-archive
+    # Codex 线程后端：注册 llm provider "codex-thread"，把 DSH 会话的每轮转给 Codex CLI。
+    - id: codex-thread-llm
+      name: 'dsh-conversation-archive'
+      config:
+        llm: true
+        root: ~/.dsh/conversation-archive
+        codexModel: deepseek-flash
+    # 供侧边栏 "Codex 会话" 使用的 agent preset。
+    - id: preset-codex
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: codex
+        name: Codex
+        order: 6
+        plugins:
+          - id: codex-default-model
+            name: '@deepseek-ai/dsh-agent-default-model'
+            config:
+              provider: codex-thread
+              model: codex-thread
 # Codex CLI 路径与超时（可选，默认自动探测 /Applications/ChatGPT.app 里的 CLI）：
 #   codex:
 #     cli: /Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex
