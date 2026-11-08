@@ -1,7 +1,7 @@
 {
   "name": "dsh-conversation-archive",
-  "version": "0.1.2",
-  "description": "Browse and search conversations archived from external coding agents (Codex, ...) inside DeepSeek Harness, from the Settings page and from agent tools.",
+  "version": "0.2.0",
+  "description": "Browse and search conversations archived from external coding agents (Codex, ...) inside DeepSeek Harness, from the Settings page and from agent tools — and send a message back into an unarchived Codex thread (including model switching).",
   "type": "module",
   "license": "MIT",
   "keywords": [
@@ -47,5 +47,8 @@
   "homepage": "https://github.com/Matthew-Laplace/dsh-conversation-archive#readme",
   "bugs": {
     "url": "https://github.com/Matthew-Laplace/dsh-conversation-archive/issues"
+  },
+  "scripts": {
+    "test:send": "node --test scripts/check-send.mjs"
   }
 }

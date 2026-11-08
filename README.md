@@ -23,8 +23,48 @@ The original agent keeps its sessions untouched — the export is read-only, one
 - A **takeover** tool: `conversation_archive_takeover` resolves a conversation by full id,
   unique id prefix, or title substring, and returns a handoff package (metadata plus the
   tail of the transcript) that the agent continues from.
+- A **send** tool: `conversation_archive_send` sends a message back **into the original
+  unarchived Codex thread** through the local Codex CLI, and can switch that thread's model
+  before sending. Use it when the Codex desktop composer is blocked (for example by an
+  exhausted account) but you still want the turn to land in the original conversation.
 - **Auto refresh**: when the source database is newer than the archive index, the adapter
   re-runs before the page or tool answers.
+
+## Send a message back into Codex
+
+Codex CLI has two ways to append a turn to an unarchived thread:
+
+- `codex queue --thread <id> --message <text>` — the thread is open in the Codex app; the
+  message goes into the app queue and the app consumes it asynchronously.
+- `codex exec resume <id> [-m <model>] "<text>"` — the thread is free; the CLI runs one
+  turn and appends it. Pass `-m` to switch the thread's model first.
+
+The plugin exposes both through one tool:
+
+```json
+{
+  "ref": "天有四时",
+  "message": "继续完成最后一项检查",
+  "model": "deepseek-flash",
+  "mode": "auto"
+}
+```
+
+- `mode: "auto"` (default): if `model` is given, use `resume` (queue cannot switch models);
+  otherwise use `queue` when the Codex app process is running, `resume` when it is not.
+- `mode: "queue"` / `"resume"`: force one strategy.
+- On `thread-store conflict ... already has an active writer` in auto mode, the tool falls
+  back to `queue` and reports which delivery mode was used.
+
+Notes:
+
+- Only **unarchived Codex threads** can be messaged. The tool reads `threads.archived` and
+  refuses archived conversations.
+- The tool calls the Codex CLI; it never writes Codex's SQLite databases directly.
+- If the Codex app is open, `queue` returns quickly and the reply appears when the app
+  processes the queue. `resume` blocks until the CLI finishes the turn.
+- The CLI path can be overridden with `config.codex.cli` or the `CODEX_CLI` environment
+  variable.
 
 ## Archive format
 

@@ -30,6 +30,23 @@ const DEFAULT_REFRESH = {
 
 let refreshing = null
 
+// ---- Codex CLI：把消息发回未归档的原会话 ----
+const CODEX_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const CODEX_CLI_CANDIDATES = [
+  '/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex',
+  '/Applications/Codex.app/Contents/Resources/codex',
+]
+const CODEX_APP_PATTERNS = [
+  '^/Applications/ChatGPT\\.app/Contents/MacOS/ChatGPT',
+  '^/Applications/Codex\\.app/Contents/MacOS/Codex',
+]
+const CODEX_STATE_DB = join(homedir(), '.codex', 'state_5.sqlite')
+const DEFAULT_CODEX_CONFIG = {
+  cli: '',
+  queueTimeoutMs: 60000,
+  resumeTimeoutMs: 900000,
+}
+
 function newestMtime(paths) {
   let newest = 0
   for (const path of paths) {
@@ -207,6 +224,222 @@ function searchConversations(root, { query, source = '', limit = 30, context = 1
   return { total: results.length, limit, matches: results }
 }
 
+function runFile(command, args, { timeoutMs = 60000, maxBuffer = 8 * 1024 * 1024 } = {}) {
+  return new Promise((resolvePromise) => {
+    execFile(command, args, { timeout: timeoutMs, maxBuffer, env: process.env }, (error, stdout, stderr) => {
+      resolvePromise({
+        ok: !error,
+        error: error ? String(error.message || error) : '',
+        code: error?.code ?? null,
+        killed: Boolean(error?.killed),
+        stdout: String(stdout ?? ''),
+        stderr: String(stderr ?? ''),
+      })
+    })
+  })
+}
+
+function resolveCodexCli(config = {}) {
+  const configured = String(config.cli || config.codex?.cli || process.env.CODEX_CLI || '').trim()
+  for (const candidate of [configured, ...CODEX_CLI_CANDIDATES].filter(Boolean)) {
+    const path = expandHome(candidate)
+    if (existsSync(path)) return path
+  }
+  return 'codex'
+}
+
+async function detectCodexAppRunning(exec = runFile) {
+  for (const pattern of CODEX_APP_PATTERNS) {
+    const result = await exec('pgrep', ['-f', pattern], { timeoutMs: 5000 })
+    if (result.ok && result.stdout.trim() !== '') return true
+  }
+  return false
+}
+
+function buildCodexInvocation({ cli, mode, id, message, model }) {
+  if (mode === 'queue') {
+    return { command: cli, args: ['queue', '--thread', id, '--message', message] }
+  }
+  const args = ['exec', 'resume', id]
+  if (model) args.push('-m', model)
+  args.push('-c', 'sandbox_mode="read-only"', '--skip-git-repo-check', message)
+  return { command: cli, args }
+}
+
+function parseQueueOutput(stdout) {
+  const match = /Queued message\s+(\S+)\s+for thread\s+(\S+)/i.exec(String(stdout || ''))
+  return match ? { messageId: match[1], threadId: match[2] } : null
+}
+
+async function readCodexThreadMeta(id, exec = runFile) {
+  if (!CODEX_UUID_RE.test(String(id ?? ''))) return null
+  if (!existsSync(CODEX_STATE_DB)) return null
+  const sql = `select model, archived from threads where id='${id}';`
+  const result = await exec(
+    'sqlite3',
+    ['-readonly', '-noheader', '-separator', '|', CODEX_STATE_DB, sql],
+    { timeoutMs: 5000 },
+  )
+  if (!result.ok) return null
+  const line = result.stdout.trim().split('\n').pop() ?? ''
+  if (!line) return null
+  const [model, archived] = line.split('|')
+  return { model: String(model ?? '').trim(), archived: String(archived ?? '').trim() === '1' }
+}
+
+function tailText(text, limit = 6000) {
+  const value = String(text ?? '')
+  return value.length > limit ? value.slice(-limit) : value
+}
+
+/**
+ * 把一条用户消息发回 Codex 的原线程（未归档）。
+ *
+ * 两种交付方式：
+ * - queue：线程正被 Codex app 打开时用 `codex queue`，消息进 app 的队列，由 app 消费；
+ * - resume：线程没有活跃 writer 时用 `codex exec resume`，CLI 直接跑一轮并追加到原会话。
+ * `mode=auto` 时：指定 model 走 resume（queue 不能切模型）；否则看 app 是否在跑。
+ *
+ * 失败语义：返回 `{ ok: false, error, hint }`，不抛异常，方便模型接着判断。
+ */
+async function runLiveSend({
+  root,
+  ref,
+  message,
+  model = '',
+  mode = 'auto',
+  timeoutMs,
+  config = {},
+  exec = runFile,
+  appRunning,
+  threadMeta,
+} = {}) {
+  const entry = resolveConversation(root, ref)
+  if (!CODEX_UUID_RE.test(entry.id)) {
+    throw new Error(`"${entry.id}" is not a Codex thread id; only Codex conversations can be messaged`)
+  }
+  const text = String(message ?? '').trim()
+  if (!text) throw new Error('message is required')
+  if (text.length > 40000) throw new Error('message is too long (max 40000 characters)')
+  const modelId = String(model ?? '').trim()
+  if (modelId && !/^[A-Za-z0-9._:@/+\-]+$/.test(modelId)) throw new Error(`invalid model id "${modelId}"`)
+  const desiredMode = ['auto', 'queue', 'resume'].includes(mode) ? mode : 'auto'
+  const meta = await (threadMeta ? threadMeta(entry.id) : readCodexThreadMeta(entry.id, exec))
+  if (meta?.archived) {
+    throw new Error(`conversation ${entry.id} is archived; only unarchived Codex threads can be messaged`)
+  }
+  const running = typeof appRunning === 'boolean' ? appRunning : await detectCodexAppRunning(exec)
+  const selected = desiredMode === 'auto' ? (modelId ? 'resume' : running ? 'queue' : 'resume') : desiredMode
+  const cli = resolveCodexCli(config)
+  const queueTimeoutMs = Math.max(5000, Number(config.queueTimeoutMs || DEFAULT_CODEX_CONFIG.queueTimeoutMs))
+  const resumeTimeoutMs = Math.max(10000, Number(timeoutMs || config.resumeTimeoutMs || DEFAULT_CODEX_CONFIG.resumeTimeoutMs))
+  const base = {
+    id: entry.id,
+    title: entry.title,
+    source: entry.source,
+    app_running: running,
+    requested_mode: desiredMode,
+    mode: selected,
+    model: modelId || meta?.model || '',
+    command: cli,
+  }
+  const queueInvocation = buildCodexInvocation({ cli, mode: 'queue', id: entry.id, message: text })
+  const resumeInvocation = buildCodexInvocation({ cli, mode: 'resume', id: entry.id, message: text, model: modelId })
+
+  if (selected === 'queue') {
+    const queueResult = await exec(queueInvocation.command, queueInvocation.args, {
+      timeoutMs: queueTimeoutMs,
+      maxBuffer: 2 * 1024 * 1024,
+    })
+    if (queueResult.ok) {
+      const parsed = parseQueueOutput(queueResult.stdout)
+      const latest = await readCodexThreadMeta(entry.id, exec)
+      return {
+        ok: true,
+        ...base,
+        delivery: 'queue',
+        queued_message_id: parsed?.messageId ?? '',
+        thread_model: latest?.model ?? base.model,
+        output_tail: tailText(queueResult.stdout + queueResult.stderr, 2000),
+        hint: 'Message queued to the open Codex thread; the app consumes it asynchronously.',
+      }
+    }
+    if (desiredMode === 'queue') {
+      return {
+        ok: false,
+        ...base,
+        delivery: 'queue',
+        error: tailText(queueResult.error + queueResult.stderr, 2000),
+        hint: 'The Codex app is probably not running or the thread is not open; retry with mode=resume.',
+      }
+    }
+  }
+
+  const resumeResult = await exec(resumeInvocation.command, resumeInvocation.args, {
+    timeoutMs: resumeTimeoutMs,
+    maxBuffer: 16 * 1024 * 1024,
+  })
+  if (resumeResult.ok) {
+    const latest = await readCodexThreadMeta(entry.id, exec)
+    return {
+      ok: true,
+      ...base,
+      delivery: 'resume',
+      thread_model: latest?.model ?? (modelId || base.model),
+      output_tail: tailText(resumeResult.stdout, 6000),
+      hint: 'The thread was resumed by the Codex CLI; the message and reply are appended to the original conversation.',
+    }
+  }
+  const combined = `${resumeResult.error}\n${resumeResult.stderr}`.trim()
+  const activeWriter = /active writer|thread-store conflict/i.test(combined)
+  if (activeWriter) {
+    if (desiredMode === 'resume') {
+      return {
+        ok: false,
+        ...base,
+        delivery: 'resume',
+        error: tailText(combined, 2000),
+        hint: 'The thread is held by another writer. Use mode=queue for an open thread, or close it in Codex first.',
+      }
+    }
+    const fallback = await exec(queueInvocation.command, queueInvocation.args, {
+      timeoutMs: queueTimeoutMs,
+      maxBuffer: 2 * 1024 * 1024,
+    })
+    if (fallback.ok) {
+      const parsed = parseQueueOutput(fallback.stdout)
+      const latest = await readCodexThreadMeta(entry.id, exec)
+      return {
+        ok: true,
+        ...base,
+        mode: 'queue',
+        delivery: 'queue',
+        queued_message_id: parsed?.messageId ?? '',
+        thread_model: latest?.model ?? base.model,
+        output_tail: tailText(fallback.stdout, 2000),
+        hint: 'The thread is held by the app, so the message was queued instead; the app consumes it asynchronously.',
+      }
+    }
+    return {
+      ok: false,
+      ...base,
+      delivery: 'resume',
+      error: tailText(combined, 2000),
+      fallback_error: tailText(fallback.error + fallback.stderr, 1000),
+      hint: 'The thread is held by another writer and queueing also failed.',
+    }
+  }
+  return {
+    ok: false,
+    ...base,
+    delivery: 'resume',
+    error: tailText(combined, 4000),
+    hint: 'Codex CLI could not append the message; check the model id, account quota and Codex CLI path.',
+  }
+}
+
+export { runLiveSend, buildCodexInvocation, parseQueueOutput, detectCodexAppRunning, readCodexThreadMeta, resolveCodexCli }
+
 function dispatch(root, params) {
   const op = params.get('op') ?? 'list'
   if (op === 'list') {
@@ -250,6 +483,8 @@ export function apply(ctx, config = {}) {
         ? PACKAGED_ADAPTER
         : '',
   }
+
+  const codex = { ...DEFAULT_CODEX_CONFIG, ...(config.codex || {}) }
 
   ctx.effect(() =>
     ctx.webServer.register({
@@ -441,6 +676,59 @@ export function apply(ctx, config = {}) {
       async execute(args) {
         await maybeRefresh(root, refresh)
         return searchConversations(root, args ?? {})
+      },
+    }),
+  )
+
+  ctx.effect(() =>
+    ctx.tools.register({
+      name: 'conversation_archive_send',
+      description:
+        'Send a message back into an UNARCHIVED Codex conversation (the original live thread) through ' +
+        'the local Codex CLI. mode=queue: the thread is open in the Codex app, so the message is queued ' +
+        'and the app consumes it. mode=resume: the thread is free, so the CLI runs one turn and appends ' +
+        'it; pass model to switch the thread model first. mode=auto picks between them. ' +
+        'Requires the Codex CLI and app on this Mac; it never writes the Codex databases directly.',
+      parameters: {
+        type: 'object',
+        properties: {
+          ref: { type: 'string', description: 'Conversation id, unique id prefix, or a distinctive title substring.' },
+          message: { type: 'string', description: 'Text to send as the next user turn.' },
+          model: { type: 'string', description: 'Optional model id; resume mode switches the thread to it before sending.' },
+          mode: { type: 'string', enum: ['auto', 'queue', 'resume'], description: 'Delivery strategy; default auto.' },
+          timeout_ms: { type: 'integer', description: 'Resume timeout in milliseconds; default 900000.' },
+        },
+        required: ['ref', 'message'],
+        additionalProperties: false,
+      },
+      output: {
+        schema: {
+          type: 'object',
+          properties: {
+            ok: { type: 'boolean' },
+            id: { type: 'string' },
+            delivery: { type: 'string' },
+            thread_model: { type: 'string' },
+            output_tail: { type: 'string' },
+            error: { type: 'string' },
+            hint: { type: 'string' },
+          },
+        },
+        render(_args, value) {
+          return jsonText(value)
+        },
+      },
+      async execute(args) {
+        await maybeRefresh(root, refresh)
+        return runLiveSend({
+          root,
+          ref: args?.ref,
+          message: args?.message,
+          model: args?.model,
+          mode: args?.mode ?? 'auto',
+          timeoutMs: args?.timeout_ms,
+          config: codex,
+        })
       },
     }),
   )

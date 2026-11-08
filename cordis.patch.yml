@@ -7,3 +7,7 @@
       name: 'dsh-conversation-archive'
       config:
         root: ~/.dsh/conversation-archive
+# Codex CLI 路径与超时（可选，默认自动探测 /Applications/ChatGPT.app 里的 CLI）：
+#   codex:
+#     cli: /Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex
+#     resumeTimeoutMs: 900000

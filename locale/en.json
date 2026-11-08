@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Conversation archive",
-    "description": "Browse and search conversations archived from external coding agents, such as Codex, inside the Harness."
+    "description": "Browse and search conversations archived from external coding agents; agent tools can send a message back into the original Codex thread (including model switching), otherwise read-only."
   }
 }

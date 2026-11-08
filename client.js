@@ -7,7 +7,7 @@ window.__ModuleLoader__.load({
     const LABELS = {
       zh: {
         title: '对话档案',
-        hint: '来自外部编程助手的已归档对话。只读浏览，选中后可在 DSH 里接着做。',
+        hint: '来自外部编程助手的已归档对话。只读浏览；agent 可用 conversation_archive_send 把消息发回原 Codex 线程。',
         search: '搜索标题、目录、id',
         empty: '没有匹配的对话。',
         loading: '加载中…',
@@ -17,7 +17,7 @@ window.__ModuleLoader__.load({
       },
       en: {
         title: 'Conversation archive',
-        hint: 'Conversations archived from external coding agents. Read-only; continue the work in DSH.',
+        hint: 'Conversations archived from external coding agents. Read-only here; agent tools can send a message back into the original Codex thread.',
         search: 'Search title, directory or id',
         empty: 'No matching conversations.',
         loading: 'Loading…',
