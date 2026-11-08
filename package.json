@@ -1,17 +1,22 @@
 {
   "name": "dsh-conversation-archive",
-  "version": "0.3.0",
-  "description": "Browse Codex conversations inside DeepSeek Harness, send messages back into unarchived Codex threads, and open Codex-backed sessions in the sidebar with an OpenAI/Codex icon.",
+  "version": "0.4.0",
+  "description": "在 DeepSeek Harness 里把 Codex CLI 拉成可视化对话窗口：浏览线程、查看最近一轮与全部历史、通过 CLI 继续原线程；CLI 能跑的地方（含 WSL/远程/容器/其他系统）都能用。A Codex CLI-backed conversation panel for DeepSeek Harness.",
   "type": "module",
   "license": "MIT",
   "keywords": [
     "dsh",
+    "dsh-plugin",
     "deepseek-harness",
-    "plugin",
     "codex",
-    "archive",
-    "conversation",
-    "migration"
+    "codex-cli",
+    "codex-gui",
+    "chat-ui",
+    "conversation-ui",
+    "wsl",
+    "cross-platform",
+    "cli-wrapper",
+    "gui"
   ],
   "exports": {
     ".": "./index.js",
@@ -47,8 +52,5 @@
   "homepage": "https://github.com/Matthew-Laplace/dsh-conversation-archive#readme",
   "bugs": {
     "url": "https://github.com/Matthew-Laplace/dsh-conversation-archive/issues"
-  },
-  "scripts": {
-    "test:send": "node --test scripts/check-send.mjs"
   }
 }

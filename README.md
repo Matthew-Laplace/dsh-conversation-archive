@@ -1,175 +1,106 @@
-# dsh-conversation-archive
+# DSH × Codex：把 Codex CLI 拉成 DSH 里的可视化对话窗口
 
-Browse, search, and **take over** conversations that were archived from another coding
-agent (Codex today) inside [DeepSeek Harness](https://github.com/deepseek-ai) —
-without touching the original client.
+**dsh-conversation-archive** 是一个 DeepSeek Harness 插件。它把本机的 **Codex CLI** 接进 DSH，在 DSH 里重建一个 Codex 对话窗口：像在 GUI 里一样浏览线程、读上下文、选模型和推理档、发消息——但每一条请求都走 Codex CLI，DSH 只负责显示。
 
-## Why
+一句话：**Codex 只有命令行也能当图形界面用；Codex GUI 发不出消息时，用它接着原线程聊。**
 
-A hosted coding agent can hard-block its composer when the account's usage is exhausted,
-even for conversations that a local provider serves
-([openai/codex#48816](https://github.com/openai/codex/issues/48816),
-[#59175](https://github.com/openai/codex/issues/59175)). That block is client-side and
-cannot be configured away. This plugin takes the other path: mirror those conversations
-into the Harness and continue the work there.
+## 为什么做这个插件
 
-The original agent keeps its sessions untouched — the export is read-only, one-way.
+- **GUI 发不出消息，CLI 还能用**：额度用完、界面卡住、发送被拦时，`codex exec resume` / `codex queue` 往往还通。这个插件用 CLI 把原线程接出来，消息直接写回原对话，不新建会话、不换模型、不丢上下文。
+- **把命令行变成可点击的界面**：不用记 `codex exec` 的参数、JSONL 输出和线程 ID，点开面板选对话就能继续聊。
+- **跨系统、跨环境都能用**：Codex 跑在 WSL、远程开发机、容器或另一个操作系统里，只要 DSH 所在环境能调用到 `codex` 命令，就能用同一套可视化界面继续原有对话。终端-only 的环境也能得到接近 Codex GUI 的操作体验。
+- **不消耗 DSH 的模型 token**：插件自己不调 DSH 模型，所有模型调用都由 Codex CLI 完成；DSH 只是外壳。
 
-## What you get
+## 功能
 
-- A **Settings → Conversation archive** page: search, list, read, copy.
-- Three agent tools: `conversation_archive_list`, `conversation_archive_read`,
-  `conversation_archive_search`.
-- A **takeover** tool: `conversation_archive_takeover` resolves a conversation by full id,
-  unique id prefix, or title substring, and returns a handoff package (metadata plus the
-  tail of the transcript) that the agent continues from.
-- A **send** tool: `conversation_archive_send` sends a message back **into the original
-  unarchived Codex thread** through the local Codex CLI, and can switch that thread's model
-  before sending. Use it when the Codex desktop composer is blocked (for example by an
-  exhausted account) but you still want the turn to land in the original conversation.
-- **Auto refresh**: when the source database is newer than the archive index, the adapter
-  re-runs before the page or tool answers.
+- **三列面板**：侧边栏「Codex」图标打开。左列线程列表，中列对话，右列调用产物。
+- **线程列表**：最近未归档线程，可按关键词过滤，可粘贴 `codex://threads/<id>` 或 36 位线程编号直达；按项目/工作目录分组，项目归属只做有依据展示（目录匹配才显示项目名，同一目录登记给多个项目时显示「项目未知」）。
+- **对话视图**：默认只显示最近一轮（你 + Codex），可一键加载全部更早历史；回复按 Markdown 渲染（标题、列表、代码块、表格外的常用语法、链接），长文自动换行。
+- **过程卡片**：每轮下面可折叠列出该轮执行的命令、文件改动、子代理、MCP 工具、联网搜索、计划等事件，默认收起。
+- **右列产物**：子代理列表、涉及的文件（点击复制路径）、命令数量，一眼看清这轮 Codex 干了什么。
+- **Composer**：模型选择（读 Codex 的模型目录，21 个模型）、推理强度（effort）、Sandbox、语音输入（DSH 语音服务转写）、发送/打断（发送中变停止按钮），发送失败显示 CLI 原始错误 + 可操作提示（额度重置时间 / 线程被占用 / 模型不可用）并带「重试」。
+- **额度检查**：标题栏 ⚡ 按钮通过 Codex app-server 只读查询账户额度（需已登录 Codex）。
+- **可选 app-server 后端**：默认 `codex exec resume`（稳）；在配置里设 `codex.transport: app-server` 可改用常驻 `codex app-server --stdio`（少一次进程启动、支持 interrupt/额度预读）。
 
-## Send a message back into Codex
+## 安装
 
-Codex CLI has two ways to append a turn to an unarchived thread:
+要求：已安装并登录 Codex CLI（`codex` 在 PATH 上，`codex exec --help` 可用）；DSH 0.2.x。
 
-- `codex queue --thread <id> --message <text>` — the thread is open in the Codex app; the
-  message goes into the app queue and the app consumes it asynchronously.
-- `codex exec resume <id> [-m <model>] "<text>"` — the thread is free; the CLI runs one
-  turn and appends it. Pass `-m` to switch the thread's model first.
-
-The plugin exposes both through one tool:
-
-```json
-{
-  "ref": "天有四时",
-  "message": "继续完成最后一项检查",
-  "model": "deepseek-flash",
-  "mode": "auto"
-}
-```
-
-- `mode: "auto"` (default): if `model` is given, use `resume` (queue cannot switch models);
-  otherwise use `queue` when the Codex app process is running, `resume` when it is not.
-- `mode: "queue"` / `"resume"`: force one strategy.
-- On `thread-store conflict ... already has an active writer` in auto mode, the tool falls
-  back to `queue` and reports which delivery mode was used.
-
-Notes:
-
-- Only **unarchived Codex threads** can be messaged. The tool reads `threads.archived` and
-  refuses archived conversations.
-- The tool calls the Codex CLI; it never writes Codex's SQLite databases directly.
-- If the Codex app is open, `queue` returns quickly and the reply appears when the app
-  processes the queue. `resume` blocks until the CLI finishes the turn.
-- The CLI path can be overridden with `config.codex.cli` or the `CODEX_CLI` environment
-  variable.
-
-## Codex sessions in the sidebar
-
-0.3.0 adds a Codex front end to the Harness sidebar. The session looks like a normal
-Harness session, but its replies come from a native Codex thread through the Codex CLI,
-not from the Harness model.
-
-- **Sidebar footer action** (`Codex` with an OpenAI/Codex mark): opens the add dialog.
-- **New Codex session**: creates a Harness session bound to the `codex` agent preset; the
-  first user message starts a new Codex thread with `codex exec --json`.
-- **Paste deep link**: accepts `codex://threads/<id>` or a raw thread id and creates a
-  session bound to that existing Codex thread.
-- **One-click fetch**: lists unarchived Codex threads from the archive index; pick one to
-  bind it without leaving the Harness.
-- **Session row icon**: bound sessions show the Codex mark in the left sidebar.
-- Command, file-change, reasoning, and message items from `codex exec --json` are mirrored
-  into the Harness transcript as chat content. The Codex CLI executes them once; the
-  Harness only displays the result.
-
-Binding metadata is stored at `~/.dsh/conversation-archive/codex-bindings.json`. The
-host-side adapter is registered as the LLM provider `codex-thread`; its Codex model comes
-from the `codexModel` config field (default `deepseek-flash`). Agent preset `codex` is
-declared by this bundle's patch.
-
-Requirement: after installing a new version of this plugin, reload plugins or restart
-DeepSeek Harness so the `codex-thread` provider and the `codex` preset are registered.
-
-## Archive format
-
-## Archive format
-
-The plugin knows nothing about Codex. It reads a directory:
-
-```
-~/.dsh/conversation-archive/
-  index.json                        # schema version 1
-  conversations/<source>/<id>.md    # one Markdown transcript per conversation
-```
-
-`index.json`:
-
-```json
-{
-  "version": 1,
-  "generated_at": "2026-11-08 03:18",
-  "sources": ["codex"],
-  "count": 453,
-  "conversations": [
-    {
-      "id": "01a1aff9-...",
-      "source": "codex",
-      "title": "注意，严禁防御性写作",
-      "cwd": "/Users/me/Desktop",
-      "model": "deepseek-flash",
-      "created_at_ms": 1794078390089,
-      "updated_at_ms": 1794078407924,
-      "items": 4155,
-      "chars": 2043635,
-      "path": "conversations/codex/01a1aff9-....md"
-    }
-  ]
-}
-```
-
-Any other tool can join by writing the same shape under a different `source`.
-
-## Install
+**从 npm 安装到 DSH profile：**
 
 ```sh
-dsh plugin install dsh-conversation-archive
+dsh plugin --profile desktop add dsh-conversation-archive
 ```
 
-or through the plugin manager with the package name.
+或直接在 DSH 的「插件」页搜索 `dsh-conversation-archive` 安装，然后重启/重载 DSH。
 
-## Configure
+**本地开发安装：**
+
+```sh
+dsh plugin --profile desktop add /path/to/dsh-conversation-archive
+```
+
+插件启用后，第一次打开面板时会用包内 Python 适配器把本机 Codex 线程导出到 `~/.dsh/conversation-archive/`（只读 Codex 数据库，不写回）。
+
+## 使用
+
+1. 点左侧边栏的 Codex 图标打开面板。
+2. 左列选一个线程（或粘贴线程 ID），中列显示最近一轮。
+3. 在底部输入框写消息，Enter 发送；需要长文本用 Shift+Enter 换行。
+4. 需要看历史就点「加载全部更早历史」；需要看执行细节就展开「过程」卡片。
+5. 模型/推理档可在发送前切换；发送中可点 ■ 打断。
+
+发送走两条 CLI 路径：线程空闲时 `codex exec resume <thread-id> --json`；线程被 GUI 占用（active writer）时回退 `codex queue --thread <thread-id>`。所有读写都通过本机 Codex 数据（`~/.codex/state_5.sqlite`、`~/.codex/thread_history_1.sqlite`），插件不修改 Codex 数据库，也不绕过任何 GUI 限制。
+
+## 可选：app-server 后端
+
+在 DSH profile 的 `cordis.patch.yml` 里给该插件加配置：
 
 ```yaml
-- insert:
-    - id: conversation-archive
-      name: dsh-conversation-archive
-      config:
-        root: ~/.dsh/conversation-archive
-        refresh:
-          script: ~/.dsh/conversation-archive/adapters/codex/export_codex_threads.py
+- id: conversation-archive
+  name: dsh-conversation-archive
+  config:
+    root: ~/.dsh/conversation-archive
+    codex:
+      transport: app-server
+      appServerIdleMs: 600000
 ```
 
-`refresh.script` is optional. Without it the plugin serves whatever is already in `root`.
+app-server 是实验接口：线程单写者、额度读取要求已登录的 ChatGPT 账号；初始化失败会自动回退 `exec resume`。
 
-### Codex adapter
+## 常见问题
 
-`adapters/codex/export_codex_threads.py` reads `~/.codex/state_5.sqlite`
-(`threads.archived = 0`) and `~/.codex/thread_history_1.sqlite`, and writes the archive.
-It only reads; it never writes to the Codex databases.
+- **发送报 `[CODEX_QUOTA]`**：Codex 侧额度/配额限制，按错误里的重置时间等待，或在 CC Switch 调整官方额度保护/切到支持该模型的 provider。
+- **`[CODEX_BUSY]`**：线程正被 Codex App 或另一个 CLI 占用；先在 Codex 里关闭该线程，或稍后再发。
+- **`[CODEX_AUTH]`**：Codex 登录态失效，先运行 `codex login`。
+- **没有项目分组**：Codex 的 `threads.project_id` 可能为空，此时按工作目录分组（组标题带「目录」标签），未匹配到目录的归「未分组」。
+- **⚡ 额度读取报 authentication required**：当前 Codex 账号环境不提供额度接口；不影响发送。
 
-```sh
-python3 adapters/codex/export_codex_threads.py
+## 数据与边界
+
+- 只读本机 Codex 数据；不写 Codex 数据库、不上传任何内容。
+- 所有模型调用经 Codex CLI，插件不消耗 DSH 模型 token。
+- 语音输入使用 DSH 自带的语音服务，首次使用需授权麦克风。
+- 插件不试图绕过 Codex 的任何限制：GUI 发不出就是发不出，CLI 能发才发。
+
+## 开发
+
+```
+index.js                     Host 半：HTTP 路由、CLI 调用、app-server JSON-RPC 后端
+client.js                    Web 客户端：侧栏图标 + main 面板（三列布局）+ 设置页
+cordis.patch.yml             bundle 补丁（一行 insert）
+adapters/codex/export_codex_threads.py   Codex 数据导出（只读）
 ```
 
-Tool output inside a transcript is truncated (head 1200 + tail 400 characters per item) and
-`reasoning` items are skipped, which keeps a 226 MB projection down to roughly 35 MB of
-readable text.
+- 架构：DSH 槽位（`sidebar.panellist` 图标 + `main` 面板 + `settings.section` 设置页），客户端只渲染，数据全部来自 Host 同源路由。
+- 不需要构建：`client.js` 是手写的 `__ModuleLoader__` 工厂，直接加载 React。
+- 本地改动后：客户端热重载；Host 改动需在 DSH 插件页禁用再启用该 bundle。
 
-## HTTP surface
+## English
 
-`GET /api/conversation-archive?op=…` with `op=list|read|search`. Same data as the tools.
+A DeepSeek Harness plugin that turns your local **Codex CLI** into a visual conversation window inside DSH: browse threads, read context, pick model/effort, and continue the original thread through the CLI. Useful when the Codex GUI can't send (quota/UI issues) but the CLI still works, or when Codex runs in WSL, a remote box, a container or another OS and you want a clickable interface for it. No DSH model tokens are used; DSH is only the shell.
+
+Install: `dsh plugin --profile desktop add dsh-conversation-archive`.
 
 ## License
 

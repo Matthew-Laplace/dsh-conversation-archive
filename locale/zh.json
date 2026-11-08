@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "对话档案",
-    "description": "在 Harness 里浏览、搜索并从 Codex 等外部编程助手归档的对话；agent 工具可把消息发回原 Codex 线程（含切换模型），其余场景只读。"
+    "description": "在 DSH 里用 Codex CLI 重建一个 Codex 对话窗口：浏览未归档线程、查看最近一轮对话、继续向原线程发消息。所有请求都走 Codex CLI，不经过 DSH 模型。"
   }
 }

@@ -1,32 +1,11 @@
-# dsh-conversation-archive
-# 安装后按需启用。refresh.script 指向 Codex adapter（可选）：
-#   refresh:
-#     script: <package>/adapters/codex/export_codex_threads.py
+# dsh-conversation-archive — Codex CLI 面板
+# 只注册一个插件：档案导出/刷新、面板 HTTP 接口、只读工具。
+# 面板本身通过 Codex CLI（codex exec resume / codex queue）继续原线程，不经过 DSH 会话与模型。
 - insert:
     - id: conversation-archive
       name: 'dsh-conversation-archive'
       config:
         root: ~/.dsh/conversation-archive
-    # Codex 线程后端：注册 llm provider "codex-thread"，把 DSH 会话的每轮转给 Codex CLI。
-    - id: codex-thread-llm
-      name: 'dsh-conversation-archive'
-      config:
-        llm: true
-        root: ~/.dsh/conversation-archive
-        codexModel: deepseek-flash
-    # 供侧边栏 "Codex 会话" 使用的 agent preset。
-    - id: preset-codex
-      name: '@deepseek-ai/dsh-agent-preset'
-      config:
-        id: codex
-        name: Codex
-        order: 6
-        plugins:
-          - id: codex-default-model
-            name: '@deepseek-ai/dsh-agent-default-model'
-            config:
-              provider: codex-thread
-              model: codex-thread
 # Codex CLI 路径与超时（可选，默认自动探测 /Applications/ChatGPT.app 里的 CLI）：
 #   codex:
 #     cli: /Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex

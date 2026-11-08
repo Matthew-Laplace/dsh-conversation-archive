@@ -78,6 +78,19 @@ def _text_blocks(content: Any) -> str:
     return "\n".join(p for p in parts if p)
 
 
+def thread_display_title(thread: Dict[str, Any]) -> str:
+    """Codex 里真正展示的名字优先：name → title → 首条用户消息 → preview。"""
+    for key in ("name", "title", "first_user_message", "preview"):
+        value = (thread.get(key) or "").strip()
+        if not value:
+            continue
+        first = next((line.strip() for line in value.splitlines() if line.strip()), "")
+        if not first:
+            continue
+        return first[:60] + ("…" if len(first) > 60 else "")
+    return "(无标题)"
+
+
 def render_item(item: Dict[str, Any]) -> Optional[str]:
     """把一条 thread_items.item_json 渲染成 Markdown 片段。"""
     kind = item.get("type")
@@ -191,11 +204,13 @@ def export_thread(con: sqlite3.Connection, thread: Dict[str, Any]) -> Optional[D
 
     created = thread.get("created_at_ms") or 0
     updated = thread.get("updated_at_ms") or 0
-    title = (thread.get("title") or "").strip() or "(无标题)"
+    title = thread_display_title(thread)
+    project = (thread.get("project") or "").strip()
     header = [
         f"# {title}",
         "",
         f"- thread id: `{thread['id']}`",
+        f"- 项目: {project or '-'}",
         f"- 工作目录: `{thread.get('cwd') or '-'}`",
         f"- 模型: `{thread.get('model') or '-'}`（provider: `{thread.get('model_provider') or '-'}`）",
         f"- 创建: {time.strftime('%Y-%m-%d %H:%M', time.localtime(created / 1000)) if created else '-'}",
@@ -213,6 +228,9 @@ def export_thread(con: sqlite3.Connection, thread: Dict[str, Any]) -> Optional[D
         "id": thread["id"],
         "source": SOURCE,
         "title": title,
+        "project": project,
+        "project_basis": thread.get("project_basis") or "none",
+        "thread_source": thread.get("thread_source") or "user",
         "cwd": thread.get("cwd") or "",
         "model": thread.get("model") or "",
         "created_at_ms": created,
@@ -227,10 +245,60 @@ def main() -> None:
     os.makedirs(OUT_DIR, exist_ok=True)
     state = sqlite3.connect(f"file:{STATE_DB}?mode=ro", uri=True)
     state.row_factory = sqlite3.Row
-    threads = [dict(r) for r in state.execute(
-        "select id, title, cwd, model, model_provider, created_at_ms, updated_at_ms "
-        "from threads where archived = 0 order by updated_at_ms desc"
-    )]
+    project_roots: List[Dict[str, str]] = []
+    try:
+        for row in state.execute(
+            "select r.project_id as project_id, r.path as path, coalesce(p.name, '') as name "
+            "from project_roots r left join projects p on p.id = r.project_id "
+            "order by length(r.path) desc"
+        ):
+            root = str(row["path"] or "").strip()
+            name = str(row["name"] or "").strip()
+            if root and name:
+                project_roots.append({"path": root.rstrip("/"), "name": name})
+    except sqlite3.Error:
+        pass
+
+    all_paths = [root["path"] for root in project_roots]
+
+    def is_generic(root: str) -> bool:
+        # 同时是别的项目根目录的祖先（如 /Users/syc/Desktop），只当容器不当项目名。
+        return any(other != root and other.startswith(root + "/") for other in all_paths)
+
+    specific_roots = [root for root in project_roots if not is_generic(root["path"])]
+
+    def project_of(cwd: str) -> tuple[str, str]:
+        """返回 (项目名, 依据)：dir=目录边界匹配；ambiguous=同目录多个项目；none=未匹配。"""
+        target = str(cwd or "").strip().rstrip("/")
+        if not target:
+            return ("", "none")
+        matches = []
+        for root in specific_roots:
+            base = root["path"]
+            if target == base or target.startswith(base + "/"):
+                matches.append(root)
+        if not matches:
+            return ("", "none")
+        longest = max(len(root["path"]) for root in matches)
+        winners = [root for root in matches if len(root["path"]) == longest]
+        names = {root["name"] for root in winners}
+        if len(names) > 1:
+            return ("", "ambiguous")
+        return (winners[0]["name"], "dir")
+
+    threads = []
+    for row in state.execute(
+        "select id, title, name, first_user_message, preview, cwd, model, model_provider, "
+        "created_at_ms, updated_at_ms, project_id, coalesce(thread_source, '') as thread_source "
+        "from threads where archived = 0 "
+        "and coalesce(thread_source, 'user') not in ('subagent', 'guardian_review') "
+        "order by updated_at_ms desc"
+    ):
+        thread = dict(row)
+        project, project_basis = project_of(thread.get("cwd") or "")
+        thread["project"] = project
+        thread["project_basis"] = project_basis
+        threads.append(thread)
     state.close()
 
     history = sqlite3.connect(f"file:{HISTORY_DB}?mode=ro", uri=True)
